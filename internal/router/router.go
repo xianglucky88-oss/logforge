@@ -3,11 +3,13 @@ package router
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/internal-platform/logforge/internal/plugin"
 )
 
 // Rule 是一条路由规则：所有 match 字段都相等时命中。
+// 规则按配置顺序评估，第一条命中的规则生效；都不命中走默认出口。
 type Rule struct {
 	Name  string            `yaml:"name"`
 	Match map[string]string `yaml:"match"`
@@ -40,10 +42,47 @@ func New(rules []Rule, sinks map[string]plugin.Sink, defaults []string) (*Router
 }
 
 // Route 返回该记录应当写入的所有输出端名。
-//
-// 当前实现只返回默认出口——规则匹配逻辑尚未接入。
+// 第一条全部字段命中的规则生效；没有命中时返回默认出口。
 func (r *Router) Route(record map[string]any) []string {
+	for _, rule := range r.rules {
+		if matchAll(rule.Match, record) {
+			return rule.Sinks
+		}
+	}
 	return r.defaults
+}
+
+func matchAll(match map[string]string, record map[string]any) bool {
+	for k, want := range match {
+		got, ok := record[k]
+		if !ok {
+			return false
+		}
+		if stringify(got) != want {
+			return false
+		}
+	}
+	return true
+}
+
+// stringify 把不同解析器产出的标量统一成文本再比较：
+// JSON 的数字是 float64，logfmt/regex 经 coerce 可能是 int64，
+// 因此 500 与 500.0 在路由匹配中等价，true 与 "true" 等价。
+func stringify(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // Sink 按名字取输出端。

@@ -5,12 +5,37 @@ source:
 multiline:
   # 一条记录的起始行：带时间戳的堆栈头、JSON 行、logfmt 行
   start_pattern: '^(\d{4}-\d{2}-\d{2}T|\{|ts=)'
+  # 续行：缩进的堆栈帧。设置之后，既不匹配起始也不匹配续行的
+  # "外来行"（如坏行）会收尾当前记录并单独成条，而不是粘进去。
+  continuation_pattern: '^\s'
   max_lines: 200
+  # 距离首行这么久没有新行就强制收尾。太小会劈开写得慢的堆栈
+  # （残余续行变成孤立行），太大则文件末尾的记录延迟可见。
   flush_after_ms: 2000
+  # 未设置 continuation_pattern 时的兜底：当前块已能被解析链
+  # 完整解析时，遇到非起始行就先收尾。注意解析链不能把多行记录
+  # 的首行判为完整（本配置用 continuation_pattern 保护堆栈）。
+  flush_on_complete: true
+  # 孤立行：单独成条（emit），坏行各自计数；位点恢复在堆栈中间时
+  # 可改 buffer 让残余续行重新聚成一条。
+  orphan: emit
+  # 超长记录：truncate 丢弃剩余续行并计数（overflow_lines_dropped）；
+  # split 则保留数据、让剩余续行开启新块（通常解析失败进死信）。
+  on_overflow: truncate
+
+parse:
+  # 把胜出的解析器名写入记录，便于解释字段来源；置空字符串关闭。
+  annotate_parser: _parser
 
 parsers:
+  # 顺序即优先级：第一个成功的解析器生效，计数为 parse_ok_<name>。
   - name: json
   - name: logfmt
+  # 堆栈记录（首行带时间戳，后续是缩进帧）：(?s) 让 msg 覆盖整块。
+  # 单行记录不会匹配它——JSON/logfmt 在前面已经命中。
+  - name: regex
+    config:
+      pattern: '(?s)^(?P<ts>\d{4}-\d{2}-\d{2}T\S+) (?P<level>[A-Z]+) (?P<service>\w+) (?P<msg>.+)$'
 
 buffer:
   capacity: 1024
@@ -18,7 +43,13 @@ buffer:
   spill_dir: /tmp/logforge/spill
 
 route:
-  rules: []
+  rules:
+    # 解析失败的记录（含坏行、被片段粘连的记录）进入死信文件，
+    # 原始文本完整保留在 raw 字段里。
+    - name: dead_letter
+      match:
+        parse_error: "true"
+      sinks: [bad]
   default: [all]
 
 sinks:
@@ -26,6 +57,10 @@ sinks:
     type: file
     config:
       path: /tmp/logforge/out/all.log
+  - name: bad
+    type: file
+    config:
+      path: /tmp/logforge/out/bad.log
 
 offset:
   path: /tmp/logforge/offset.json

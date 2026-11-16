@@ -45,6 +45,12 @@ func (jsonParser) Parse(line string) (map[string]any, error) {
 
 type logfmtParser struct{}
 
+// logfmtKey 限定键必须是标识符。粘连了半行 JSON 的日志
+// （如 `{"ts":"…ts=1`）不应被 logfmt 侥幸解析成功——
+// 键里出现 { " : 等字符说明这条记录已经损坏，应整条判失败，
+// 让原始文本完整保留给死信路由。
+var logfmtKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\-]*$`)
+
 func (logfmtParser) Name() string { return "logfmt" }
 
 // Parse 解析 k=v 形式的日志，值可以带双引号。
@@ -66,6 +72,9 @@ func (logfmtParser) Parse(line string) (map[string]any, error) {
 			continue
 		}
 		key := line[start:i]
+		if !logfmtKey.MatchString(key) {
+			return nil, fmt.Errorf("invalid key %q", key)
+		}
 		i++ // skip '='
 		var val string
 		if i < len(line) && line[i] == '"' {

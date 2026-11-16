@@ -34,6 +34,10 @@ func New(opts Options, onLine func(string), onError func(error)) *Tailer {
 }
 
 // Run 阻塞运行直到 ctx 结束。返回当前读取到的字节偏移。
+//
+// 末尾未换行的半行（pending）不计入返回的位点：它还没有作为完整行
+// 输出过，下次运行时从行首重读。宁可重读一段，也不把截断的半行
+// 当作记录发出去。
 func (t *Tailer) Run(ctx context.Context) (int64, error) {
 	f, err := os.Open(t.opts.Path)
 	if err != nil {
@@ -52,7 +56,7 @@ func (t *Tailer) Run(ctx context.Context) (int64, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return offset, ctx.Err()
+			return offset - int64(len(pending)), ctx.Err()
 		default:
 		}
 
@@ -76,7 +80,7 @@ func (t *Tailer) Run(ctx context.Context) (int64, error) {
 		}
 		if err != nil {
 			t.onError(err)
-			return offset, err
+			return offset - int64(len(pending)), err
 		}
 	}
 }

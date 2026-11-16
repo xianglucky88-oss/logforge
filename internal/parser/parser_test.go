@@ -53,3 +53,24 @@ func TestUnknownParser(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+// 粘连了半个 JSON 的行不应被 logfmt 侥幸解析：键里带 { " : 直接判失败。
+func TestLogfmtRejectsGluedLine(t *testing.T) {
+	p, _ := plugin.NewParser("logfmt", nil)
+	glued := `{"ts":"2026-11-15T10:00:0ts=2026-11-15T10:00:01Z level=INFO msg="handled"`
+	if _, err := p.Parse(glued); err == nil {
+		t.Fatal("glued line should not parse as logfmt")
+	}
+}
+
+// 合法的非常规键（带点、横线）仍然可以解析。
+func TestLogfmtKeyShapes(t *testing.T) {
+	p, _ := plugin.NewParser("logfmt", nil)
+	rec, err := p.Parse(`http.status=200 trace-id=abc`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec["http.status"] != int64(200) || rec["trace-id"] != "abc" {
+		t.Fatalf("unexpected: %v", rec)
+	}
+}

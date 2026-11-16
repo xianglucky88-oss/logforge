@@ -1,6 +1,13 @@
 // Package pipeline 把各个模块串起来。
 //
 // 数据流：tail → multiline → parser → buffer → router → sinks
+//
+// 计数对账关系（verify.sh 会断言）：
+//
+//	blocks_formed == Σ blocks_closed_<reason>
+//	blocks_formed == parse_ok + parse_failed
+//	parse_ok      == Σ parse_ok_<parser>
+//	单出口时 blocks_formed == emitted + write_failed + dropped
 package pipeline
 
 import (
@@ -24,20 +31,29 @@ type Pipeline struct {
 	cfg     *config.Config
 	metrics *metrics.Counters
 
-	merger  *multiline.Merger
-	parsers []plugin.Parser
-	router  *router.Router
-	buf     *buffer.Buffer
+	merger      *multiline.Merger
+	parsers     []plugin.Parser
+	router      *router.Router
+	buf         *buffer.Buffer
+	annotateKey string
+	flushAfter  time.Duration
 
 	offsetStore *offset.Store
 	offsetFile  *offset.File
 
 	sinks map[string]plugin.Sink
+
+	stopTimeout chan struct{}
 }
 
 // New 按配置装配管线。
 func New(cfg *config.Config) (*Pipeline, error) {
-	p := &Pipeline{cfg: cfg, metrics: &metrics.Counters{}, sinks: map[string]plugin.Sink{}}
+	p := &Pipeline{
+		cfg:         cfg,
+		metrics:     &metrics.Counters{},
+		sinks:       map[string]plugin.Sink{},
+		stopTimeout: make(chan struct{}),
+	}
 
 	// 输出端
 	for _, sc := range cfg.Sinks {
@@ -57,6 +73,13 @@ func New(cfg *config.Config) (*Pipeline, error) {
 		p.parsers = append(p.parsers, parser)
 	}
 
+	// 解析成功记录默认标注胜出的解析器，便于解释字段来源；
+	// 配置 parse.annotate_parser: "" 可关闭（避免与业务字段冲突）。
+	p.annotateKey = "_parser"
+	if cfg.Parse.AnnotateParser != nil {
+		p.annotateKey = *cfg.Parse.AnnotateParser
+	}
+
 	// 路由
 	var rules []router.Rule
 	for _, r := range cfg.Route.Rules {
@@ -69,11 +92,21 @@ func New(cfg *config.Config) (*Pipeline, error) {
 	p.router = rt
 
 	// 合并器
-	merger, err := multiline.New(multiline.Options{
-		StartPattern: cfg.Multiline.StartPattern,
-		MaxLines:     cfg.Multiline.MaxLines,
-		FlushAfter:   time.Duration(cfg.Multiline.FlushAfterMS) * time.Millisecond,
-	})
+	p.flushAfter = time.Duration(cfg.Multiline.FlushAfterMS) * time.Millisecond
+	mopts := multiline.Options{
+		StartPattern:        cfg.Multiline.StartPattern,
+		ContinuationPattern: cfg.Multiline.ContinuationPattern,
+		MaxLines:            cfg.Multiline.MaxLines,
+		FlushAfter:          p.flushAfter,
+		FlushOnComplete:     cfg.Multiline.FlushOnComplete,
+		Orphan:              multiline.OrphanPolicy(cfg.Multiline.Orphan),
+		OnOverflow:          multiline.OverflowPolicy(cfg.Multiline.OnOverflow),
+	}
+	if mopts.FlushOnComplete {
+		// 解析器链的"这条记录是否完整"反馈给边界判断。
+		mopts.Complete = p.parsesCleanly
+	}
+	merger, err := multiline.New(mopts)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +139,17 @@ func (p *Pipeline) Run(ctx context.Context) (int64, error) {
 		p.consume()
 	}()
 
+	// 超时收尾：合并器等不到新起始行时，按 flush_after 主动收尾，
+	// 否则文件末尾的记录会一直卡住直到进程退出。
+	var tickWg sync.WaitGroup
+	if p.flushAfter > 0 {
+		tickWg.Add(1)
+		go func() {
+			defer tickWg.Done()
+			p.timeoutLoop()
+		}()
+	}
+
 	start := p.offsetFile.Offsets[p.cfg.Source.Path]
 	t := tail.New(tail.Options{
 		Path:         p.cfg.Source.Path,
@@ -116,10 +160,17 @@ func (p *Pipeline) Run(ctx context.Context) (int64, error) {
 	})
 
 	off, err := t.Run(ctx)
-	// 收尾：把合并器里没发出的记录刷出去。
-	if block := p.merger.Flush(); block != "" {
-		p.handleBlock(block)
+
+	// 收尾顺序：先停超时循环（保证不再有并发的块输出），
+	// 再刷合并器里没发出的记录，最后关闭缓冲让消费端排空。
+	if p.flushAfter > 0 {
+		close(p.stopTimeout)
+		tickWg.Wait()
 	}
+	for _, res := range p.merger.Flush() {
+		p.handleBlock(res.Block, string(res.Reason))
+	}
+	p.syncMergerStats()
 	p.buf.Close()
 	wg.Wait()
 
@@ -138,26 +189,71 @@ func (p *Pipeline) Run(ctx context.Context) (int64, error) {
 	return off, err
 }
 
-func (p *Pipeline) handleLine(line string) {
-	p.metrics.Inc("lines_read", 1)
-	if block := p.merger.Feed(line); block != "" {
-		p.handleBlock(block)
+// timeoutLoop 周期性检查合并器里等待过久的记录。
+func (p *Pipeline) timeoutLoop() {
+	interval := p.flushAfter / 2
+	if interval < 50*time.Millisecond {
+		interval = 50 * time.Millisecond
+	}
+	if interval > time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopTimeout:
+			return
+		case now := <-ticker.C:
+			for _, res := range p.merger.FlushTimeout(now) {
+				p.handleBlock(res.Block, string(res.Reason))
+			}
+			p.syncMergerStats()
+		}
 	}
 }
 
-func (p *Pipeline) handleBlock(block string) {
+func (p *Pipeline) syncMergerStats() {
+	p.metrics.Set("overflow_lines_dropped", p.merger.OverflowDropped())
+}
+
+func (p *Pipeline) handleLine(line string) {
+	p.metrics.Inc("lines_read", 1)
+	for _, res := range p.merger.Feed(line) {
+		p.handleBlock(res.Block, string(res.Reason))
+	}
+}
+
+func (p *Pipeline) handleBlock(block, reason string) {
 	p.metrics.Inc("blocks_formed", 1)
+	p.metrics.Inc("blocks_closed_"+reason, 1)
 	record := p.parse(block)
 	if dropped, err := p.buf.Push(record); err == nil && dropped {
 		p.metrics.Inc("dropped", 1)
 	}
 }
 
-// parse 按注册顺序尝试解析器，全部失败时保留原文。
+// parsesCleanly 判断一个块能否被解析链完整解析，供合并器做边界反馈。
+func (p *Pipeline) parsesCleanly(block string) bool {
+	for _, parser := range p.parsers {
+		if _, err := parser.Parse(block); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// parse 按注册顺序尝试解析器，第一个成功即生效并标注胜出者；
+// 全部失败时保留完整原文，供死信路由与事后排查。
 func (p *Pipeline) parse(block string) map[string]any {
 	for _, parser := range p.parsers {
-		if rec, err := parser.Parse(block); err == nil {
+		rec, err := parser.Parse(block)
+		if err == nil {
 			p.metrics.Inc("parse_ok", 1)
+			p.metrics.Inc("parse_ok_"+parser.Name(), 1)
+			if p.annotateKey != "" {
+				rec[p.annotateKey] = parser.Name()
+			}
 			return rec
 		}
 	}
