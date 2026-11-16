@@ -18,14 +18,39 @@ buffer:
   spill_dir: /tmp/logforge/spill
 
 route:
-  rules: []
-  default: [all]
+  # 按书写顺序匹配；一条记录命中多条规则时合并所有规则的出口。
+  # 同一记录只会向同一个出口投递一次。match 的值必须与记录字段
+  # 类型一致：字符串、布尔、数字（数字之间按数值比较）。
+  rules:
+    - name: errors-to-alert
+      match:
+        level: ERROR
+      sinks: [alert]
+
+    - name: billing-audit
+      match:
+        service: billing
+      sinks: [audit]
+
+    # billing 的 ERROR 记录同时命中上面两条规则，会合并投递到
+    # alert 与 audit 两个出口。
+
+  # 未命中任何规则的记录走默认出口，不会被丢弃。
+  default: [archive]
 
 sinks:
-  - name: all
+  - name: archive
     type: file
     config:
-      path: /tmp/logforge/out/all.log
+      path: /tmp/logforge/out/archive.log
+  - name: audit
+    type: file
+    config:
+      path: /tmp/logforge/out/audit.log
+  - name: alert
+    type: file
+    config:
+      path: /tmp/logforge/out/alert.log
 
 offset:
   path: /tmp/logforge/offset.json
