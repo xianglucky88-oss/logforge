@@ -44,32 +44,49 @@ func New(opts Options) (*Merger, error) {
 	return m, nil
 }
 
-// Feed 送入一行，返回因"遇到新的起始行"而完成的上一条记录。
-// 返回空串表示还没有完整记录。
-func (m *Merger) Feed(line string) string {
+// Feed 送入一行。done 是因此完成的记录（空串表示还没有完整记录）。
+//
+// closedPrev 说明 done 的字节范围归属：
+//   - true：done 由本行之前的若干行组成（本行开启了下一条记录），
+//     其结束偏移是"上一行"的结束偏移；
+//   - false：done 就是本行自己，其结束偏移是本行的结束偏移。
+//
+// 调用方用这个区分把记录映射回文件偏移，位点提交才不会错位。
+func (m *Merger) Feed(line string) (done string, closedPrev bool) {
 	if m.start == nil {
-		return line
+		return line, false
 	}
 	if m.start.MatchString(line) {
-		var done string
 		if len(m.lines) > 0 {
 			done = strings.Join(m.lines, "\n")
 		}
 		m.lines = []string{line}
 		m.started = time.Now()
-		return done
+		return done, true
 	}
 	if len(m.lines) == 0 {
 		// 文件开头就是续行，单独成条，避免丢数据。
-		return line
+		return line, false
 	}
 	m.lines = append(m.lines, line)
 	if len(m.lines) >= m.opts.MaxLines {
 		done := strings.Join(m.lines, "\n")
 		m.lines = nil
-		return done
+		return done, true
 	}
-	return ""
+	return "", false
+}
+
+// FlushIfStale 在累积的记录超过 FlushAfter 没有新行时输出它。
+// 没有累积或计时未启用时返回空串。
+func (m *Merger) FlushIfStale(now time.Time) string {
+	if len(m.lines) == 0 || m.opts.FlushAfter <= 0 {
+		return ""
+	}
+	if now.Sub(m.started) < m.opts.FlushAfter {
+		return ""
+	}
+	return m.Flush()
 }
 
 // Flush 输出尚未完成的记录，用于退出时收尾。

@@ -22,11 +22,11 @@ const (
 	PolicyBlock Policy = "block"
 )
 
-// Buffer 是并发安全的 FIFO。
+// Buffer 是并发安全的 FIFO。元素是不透明的负载，由生产者和消费者约定类型。
 type Buffer struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
-	items    []map[string]any
+	items    []any
 	capacity int
 	policy   Policy
 	closed   bool
@@ -43,7 +43,7 @@ func New(capacity int, policy Policy, spillDir string) *Buffer {
 }
 
 // Push 入队。返回是否因为容量限制丢弃了数据。
-func (b *Buffer) Push(item map[string]any) (dropped bool, err error) {
+func (b *Buffer) Push(item any) (dropped bool, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -73,7 +73,7 @@ func (b *Buffer) Push(item map[string]any) (dropped bool, err error) {
 }
 
 // Pop 出队，队列为空时阻塞直到有数据或关闭。
-func (b *Buffer) Pop() (map[string]any, bool) {
+func (b *Buffer) Pop() (any, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for len(b.items) == 0 && !b.closed {

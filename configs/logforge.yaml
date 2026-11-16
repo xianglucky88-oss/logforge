@@ -1,6 +1,12 @@
 source:
   path: /tmp/logforge/app.log
   poll_interval_ms: 200
+  # 轮转后旧文件连续静默多少轮就封闭（句柄释放）
+  rotate_drain_quiet_polls: 3
+  # 旧文件最长 drain 时间，超时强制封闭
+  rotate_drain_max_ms: 30000
+  # 启动时找回"停机期间被轮转"文件的匹配模式，默认 path+"*"
+  # backlog_glob: /tmp/logforge/app.log*
 
 multiline:
   # 一条记录的起始行：带时间戳的堆栈头、JSON 行、logfmt 行
@@ -29,3 +35,5 @@ sinks:
 
 offset:
   path: /tmp/logforge/offset.json
+  # 已确认位点的周期提交间隔；崩溃时的重放窗口由它界定
+  commit_interval_ms: 1000

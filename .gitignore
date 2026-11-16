@@ -37,3 +37,7 @@ coverage.html
 .idea/
 .vscode/
 .DS_Store
+
+# 本机 Go 工作区（机器本地路径，不入库）
+go.work
+go.work.sum

@@ -11,9 +11,9 @@ import (
 	"syscall"
 
 	"github.com/internal-platform/logforge/internal/config"
-	"github.com/internal-platform/logforge/internal/pipeline"
 	_ "github.com/internal-platform/logforge/internal/parser" // 注册内置解析器
-	_ "github.com/internal-platform/logforge/internal/sink"   // 注册内置输出端
+	"github.com/internal-platform/logforge/internal/pipeline"
+	_ "github.com/internal-platform/logforge/internal/sink" // 注册内置输出端
 )
 
 func main() {
@@ -38,7 +38,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	off, err := p.Run(ctx)
+	err = p.Run(ctx)
 	snapshot := p.Metrics()
 
 	if *metricsOut != "" {
@@ -46,7 +46,7 @@ func main() {
 		_ = os.WriteFile(*metricsOut, raw, 0o644)
 	}
 
-	fmt.Fprintf(os.Stderr, "stopped at offset %d, metrics: %v\n", off, snapshot)
+	fmt.Fprintf(os.Stderr, "stopped, metrics: %v\n", snapshot)
 	if err != nil && err != context.Canceled {
 		os.Exit(1)
 	}

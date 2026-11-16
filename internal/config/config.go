@@ -14,6 +14,12 @@ type Config struct {
 		Path string `yaml:"path"`
 		// PollIntervalMS 是读到 EOF 后的轮询间隔。
 		PollIntervalMS int `yaml:"poll_interval_ms"`
+		// RotateDrainQuietPolls 是轮转后的旧文件连续静默多少轮被封闭。
+		RotateDrainQuietPolls int `yaml:"rotate_drain_quiet_polls"`
+		// RotateDrainMaxMS 是旧文件最长的 drain 时间（毫秒）。
+		RotateDrainMaxMS int `yaml:"rotate_drain_max_ms"`
+		// BacklogGlob 覆盖启动时找回轮转文件的匹配模式，空表示 path+"*"。
+		BacklogGlob string `yaml:"backlog_glob"`
 	} `yaml:"source"`
 
 	Multiline struct {
@@ -51,6 +57,8 @@ type Config struct {
 
 	Offset struct {
 		Path string `yaml:"path"`
+		// CommitIntervalMS 是已确认位点的周期提交间隔。
+		CommitIntervalMS int `yaml:"commit_interval_ms"`
 	} `yaml:"offset"`
 }
 
@@ -72,6 +80,15 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Source.PollIntervalMS <= 0 {
 		c.Source.PollIntervalMS = 200
+	}
+	if c.Source.RotateDrainQuietPolls <= 0 {
+		c.Source.RotateDrainQuietPolls = 3
+	}
+	if c.Source.RotateDrainMaxMS <= 0 {
+		c.Source.RotateDrainMaxMS = 30000
+	}
+	if c.Offset.CommitIntervalMS <= 0 {
+		c.Offset.CommitIntervalMS = 1000
 	}
 	if c.Multiline.MaxLines <= 0 {
 		c.Multiline.MaxLines = 200
