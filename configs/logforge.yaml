@@ -13,9 +13,32 @@ parsers:
   - name: logfmt
 
 buffer:
+  # 内存环容量（记录条数），严格有界。
   capacity: 1024
-  policy: drop_oldest
+  # 满载策略：drop_new（拒新）/ drop_oldest（保新弃旧）/ block（阻塞）/ spill（落盘）
+  policy: spill
   spill_dir: /tmp/logforge/spill
+  # 溢写段滚动与磁盘预算。
+  spill_segment_bytes: 8388608   # 8 MiB
+  spill_max_segments: 64
+  spill_max_bytes: 1073741824    # 1 GiB
+  # block 策略：最长等待 2s，超时后按 block_timeout_action 兜底，绝不永久卡死。
+  block_timeout_ms: 2000
+  block_timeout_action: drop_new
+  # 溢写失败（磁盘满/预算耗尽）后的兜底动作。
+  spill_full_action: drop_new
+  # 每 Ack 256 条原子落盘一次 manifest（崩溃窗口内按 at-least-once 重放）。
+  manifest_every_acks: 256
+
+output:
+  # 单次 sink.Write 的最长耗时，超时即视为失败，防止慢 sink 永久卡住消费协程。
+  write_timeout_ms: 1000
+  # 单条记录写失败后的最大重试次数，超过转入 dead-letter 段（可检查、不回放）。
+  max_retries: 3
+  # 重试间指数退避基数（实际退避按 2^attempt 增长，封顶 5 倍）。
+  retry_backoff_ms: 50
+  # 关闭时排空缓冲的最长时间，超时强制 Close 并唤醒所有等待者。
+  drain_timeout_ms: 5000
 
 route:
   rules: []

@@ -32,7 +32,30 @@ type Config struct {
 		Capacity int    `yaml:"capacity"`
 		Policy   string `yaml:"policy"`
 		SpillDir string `yaml:"spill_dir"`
+		// 溢写段滚动与预算。
+		SpillSegmentBytes int64 `yaml:"spill_segment_bytes"`
+		SpillMaxSegments  int   `yaml:"spill_max_segments"`
+		SpillMaxBytes     int64 `yaml:"spill_max_bytes"`
+		// block 策略的超时（毫秒，0=无限等但关闭必唤醒）与兜底动作。
+		BlockTimeoutMS       int    `yaml:"block_timeout_ms"`
+		BlockTimeoutAction   string `yaml:"block_timeout_action"`
+		// 溢写失败（磁盘满/预算耗尽）后的兜底动作。
+		SpillFullAction      string `yaml:"spill_full_action"`
+		// 每 Ack 多少条持久化一次 manifest。
+		ManifestEveryAcks    int    `yaml:"manifest_every_acks"`
 	} `yaml:"buffer"`
+
+	// Output 控制消费协程与 sink 交互的保护参数。
+	Output struct {
+		// WriteTimeoutMS 限制单次 sink.Write 的最长耗时，0=不限制。
+		WriteTimeoutMS int `yaml:"write_timeout_ms"`
+		// MaxRetries 是单条记录写失败后的最大重试次数，超过进 dead-letter。
+		MaxRetries int `yaml:"max_retries"`
+		// RetryBackoffMS 是重试之间的基础退避（指数退避，上限 5 倍）。
+		RetryBackoffMS int `yaml:"retry_backoff_ms"`
+		// DrainTimeoutMS 是关闭时排空缓冲的最长时间，0=排完为止。
+		DrainTimeoutMS int `yaml:"drain_timeout_ms"`
+	} `yaml:"output"`
 
 	Route struct {
 		Rules []struct {
@@ -78,6 +101,29 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Buffer.Policy == "" {
 		c.Buffer.Policy = "drop_oldest"
+	}
+	switch c.Buffer.Policy {
+	case "drop_new", "drop_oldest", "block", "spill":
+	default:
+		return nil, fmt.Errorf("unknown buffer.policy %q", c.Buffer.Policy)
+	}
+	if c.Buffer.Capacity <= 0 {
+		c.Buffer.Capacity = 1024
+	}
+	if c.Buffer.BlockTimeoutAction == "" {
+		c.Buffer.BlockTimeoutAction = "drop_new"
+	}
+	if c.Buffer.SpillFullAction == "" {
+		c.Buffer.SpillFullAction = "drop_new"
+	}
+	if c.Output.MaxRetries <= 0 {
+		c.Output.MaxRetries = 3
+	}
+	if c.Output.RetryBackoffMS <= 0 {
+		c.Output.RetryBackoffMS = 50
+	}
+	if c.Output.WriteTimeoutMS < 0 {
+		c.Output.WriteTimeoutMS = 0
 	}
 	return &c, nil
 }
